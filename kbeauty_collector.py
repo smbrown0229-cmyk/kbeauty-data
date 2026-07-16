@@ -192,19 +192,20 @@ def short_addr(a):
 
 FUNC_CUTOFF = f"{TODAY.year - 2}{TODAY.month:02d}"   # 보고일 기준 최근 2년
 COMP_CUTOFF = f"{TODAY.year - 3}{TODAY.month:02d}"   # 허가/등록 기준 최근 3년
+FUNC_MAX = 5000   # 표에 담을 최신 기능성화장품 최대 건수(최근순)
 
 
 def fetch_functionals(key):
-    """보고일이 최근 2년 이내인 기능성화장품 수집.
+    """보고일이 최근 2년 이내인 기능성화장품을 최신순 최대 FUNC_MAX건 수집.
     보고품목은 오래된→최신 순(마지막 페이지가 최신)이라, 마지막 페이지부터
-    거꾸로 훑고 최근 2년 구간을 벗어나면 조기 종료(여유 3페이지)한다.
+    거꾸로 훑고 최근 2년 구간을 벗어나거나 FUNC_MAX건을 채우면 조기 종료한다.
     → 전 페이지(수천 페이지) 스캔을 피해 몇 분 내에 끝난다."""
     total, _ = mfds_body(MFDS_RPT, key, 1, 1)
     per = 100
     pages = max(1, -(-total // per))
     recent, newN, out_streak = [], 0, 0
     p = pages
-    while p >= 1 and out_streak < 3:
+    while p >= 1 and out_streak < 3 and len(recent) < FUNC_MAX:
         try:
             _, items = mfds_body(MFDS_RPT, key, p, per)
         except Exception:
@@ -226,6 +227,7 @@ def fetch_functionals(key):
             print(f"    · 기능성 역방향 스캔 {pages - p + 1}p (최근2년 {len(recent):,}건)", flush=True)
         p -= 1
     recent.sort(key=lambda x: x[0], reverse=True)
+    recent = recent[:FUNC_MAX]
     funcs = [[nm, en, fl, "보고", fmt_date(dt)] for (dt, nm, en, fl) in recent]
     return funcs, total, newN
 
