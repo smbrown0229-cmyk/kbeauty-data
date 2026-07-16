@@ -17,7 +17,7 @@ jobs:
         with:
           python-version: '3.11'
       - name: Collect customs data
-        run: python kbeauty_collector.py --key "${{ secrets.CUSTOMS_KEY }}"
+        run: python kbeauty_collector.py --key "${{ secrets.CUSTOMS_KEY }}" --uncomtrade "${{ secrets.UN_COMTRADE_KEY }}"
       - name: Commit data to repo
         run: |
           git config user.name "github-actions[bot]"
