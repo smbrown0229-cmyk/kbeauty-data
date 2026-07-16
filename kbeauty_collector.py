@@ -19,19 +19,25 @@ from datetime import date
 
 CUSTOMS_URL = "https://apis.data.go.kr/1220000/nitemtrade/getNitemtradeList"
 
-# 제품군(표시 순서)과 평균단가(USD/kg, 중량환산용)
+# 제품군(표시 순서) · HS4 · 평균단가(USD/kg, 중량환산용)
+# 색조(3304)를 관세청 6단위 소분류로 4개로 세분화: 립/아이/네일/파우더
 CATS = [
-    ("기초·기타(스킨케어)", 35),
-    ("색조화장품(메이크업)", 48),
-    ("향수·화장수",         70),
-    ("두발용",             10),
-    ("면도·탈취·기타",      12),
-    ("비누·세안",          12),
+    ("기초·기타(스킨케어)", "3304", 35),
+    ("립메이크업",          "3304", 55),
+    ("아이메이크업",        "3304", 60),
+    ("네일",               "3304", 40),
+    ("파우더·기타색조",      "3304", 45),
+    ("향수·화장수",         "3303", 70),
+    ("두발용",             "3305", 10),
+    ("면도·탈취·기타",      "3307", 12),
+    ("비누·세안",          "3401", 12),
 ]
 NC = len(CATS)
-CI = {name: i for i, (name, _) in enumerate(CATS)}
+CI = {name: i for i, (name, _hs, _p) in enumerate(CATS)}
 QUERY_HS = ["3303", "3304", "3305", "3307", "3401"]   # 4단위 5개만 호출
-MAKEUP_SUB = {"330410", "330420", "330430", "330491"}  # 색조(립·아이·네일·파우더)
+# 3304 6단위 소분류 → 색조 세부 제품군 매핑 (그 외 3304xx는 기초·기타)
+MAKEUP_MAP = {"330410": "립메이크업", "330420": "아이메이크업",
+              "330430": "네일", "330491": "파우더·기타색조"}
 
 
 def hscd_to_cat(hs):
@@ -41,7 +47,7 @@ def hscd_to_cat(hs):
     if hs.startswith("3307"): return CI["면도·탈취·기타"]
     if hs.startswith("3401"): return CI["비누·세안"]
     if hs.startswith("3304"):
-        return CI["색조화장품(메이크업)"] if hs[:6] in MAKEUP_SUB else CI["기초·기타(스킨케어)"]
+        return CI[MAKEUP_MAP.get(hs[:6], "기초·기타(스킨케어)")]
     return None
 
 
@@ -166,6 +172,11 @@ def collect(key, cc):
 # ===== 식약처 =====
 MFDS_RPT = "https://apis.data.go.kr/1471000/FtnltCosmRptPrdlstInfoService/getRptPrdlstInq"
 MFDS_MFCR = "https://apis.data.go.kr/1471000/CsmtcsMfcrtrInfoService01/getCsmtcsMfcrtrInfoList01"
+MFDS_REGL = "https://apis.data.go.kr/1471000/CsmtcsReglMaterialInfoService/getCsmtcsReglMaterialInfoService"
+MFDS_USE = "https://apis.data.go.kr/1471000/CsmtcsUseRstrcInfoService/getCsmtcsUseRstrcInfoService"
+NTS_STATUS = "https://api.odcloud.kr/api/nts-businessman/v1/status"   # 국세청 사업자 상태조회(POST)
+REGL_MAX = 4000       # 원료 규제 표에 담을 최대 건수
+USE_MAX_PAGES = 250   # CAS·한도조건 조회용 사용제한 원료 스캔 페이지 상한
 
 
 def mfds_body(base, key, page_no, rows):
@@ -219,7 +230,15 @@ def fetch_functionals(key):
             if len(dt) >= 6 and dt[:6] > page_max:
                 page_max = dt[:6]
             if nm and len(dt) >= 6 and dt[:6] >= FUNC_CUTOFF:
-                recent.append((dt, nm, it.get("ENTP_NAME") or "", it.get("REPORT_FLAG_NAME") or "보고"))
+                recent.append((dt, {
+                    "nm": nm, "entp": it.get("ENTP_NAME") or "",
+                    "flag": it.get("REPORT_FLAG_NAME") or "보고",
+                    "biz": it.get("BIZRNO") or "", "ph": it.get("ITEM_PH") or "",
+                    "basis": it.get("COSMETIC_TARGET_FLAG_NAME") or "",
+                    "std": it.get("COSMETIC_STD_NAME") or "",
+                    "seq": str(it.get("COSMETIC_REPORT_SEQ") or ""),
+                    "manuf": it.get("MANUF_NAME") or "",
+                    "mcty": it.get("MANUF_COUNTRY_NAME") or ""}))
                 if dt[:4] == str(TODAY.year):
                     newN += 1
         out_streak = out_streak + 1 if page_max < FUNC_CUTOFF else 0
@@ -228,7 +247,10 @@ def fetch_functionals(key):
         p -= 1
     recent.sort(key=lambda x: x[0], reverse=True)
     recent = recent[:FUNC_MAX]
-    funcs = [[nm, en, fl, "보고", fmt_date(dt)] for (dt, nm, en, fl) in recent]
+    # 표: [0]제품명 [1]업체 [2]제조/수입 [3]구분 [4]보고일  |  팝업: [5]사업자번호 [6]pH [7]기능성근거 [8]기준 [9]보고번호 [10]제조사 [11]제조국
+    funcs = [[d["nm"], d["entp"], d["flag"], "보고", fmt_date(dt),
+              d["biz"], str(d["ph"]), d["basis"], d["std"], d["seq"], d["manuf"], d["mcty"]]
+             for (dt, d) in recent]
     return funcs, total, newN
 
 
@@ -248,8 +270,11 @@ def fetch_companies(key):
             nm = it.get("ENTP_NAME") or ""
             pd = str(it.get("ENTP_PERMIT_DATE", "") or "")
             if nm and len(pd) >= 6 and pd[:6] >= COMP_CUTOFF:
-                picked.append((pd, [nm, it.get("INDUTY") or "", short_addr(it.get("FACTORY_ADDR")),
-                                    it.get("BOSS_NAME") or "", "", "", pd[:4]]))
+                addr = (it.get("FACTORY_ADDR") or "").strip()
+                # 표: [0]기업명 [1]업종 [2]소재지(요약) [3]대표자 [6]연도  |  팝업: [4]사업자번호 [5]허가/등록일 [7]소재지(전체)
+                picked.append((pd, [nm, it.get("INDUTY") or "", short_addr(addr),
+                                    it.get("BOSS_NAME") or "", it.get("BIZRNO") or "",
+                                    fmt_date(pd), pd[:4], addr]))
         if p % 25 == 0:
             print(f"    · 업체 {p}/{pages}p 스캔 (최근3년 {len(picked):,}개사)", flush=True)
     picked.sort(key=lambda x: x[0], reverse=True)
@@ -257,9 +282,171 @@ def fetch_companies(key):
     return rows, total
 
 
+def only_digits(s):
+    return "".join(c for c in str(s or "") if c.isdigit())
+
+
+def fetch_bizstatus(key, biznos):
+    """국세청 사업자등록 상태조회(POST, 100건씩) → {사업자번호: (영업상태, 과세유형)}."""
+    uniq, seen = [], set()
+    for x in biznos:
+        d = only_digits(x)
+        if len(d) == 10 and d not in seen:
+            seen.add(d)
+            uniq.append(d)
+    out = {}
+    url = NTS_STATUS + "?serviceKey=" + urllib.parse.quote(key, safe="") + "&returnType=JSON"
+    for i in range(0, len(uniq), 100):
+        batch = uniq[i:i + 100]
+        body = json.dumps({"b_no": batch}).encode("utf-8")
+        req = urllib.request.Request(url, data=body, method="POST",
+                                     headers={"Content-Type": "application/json",
+                                              "Accept": "application/json",
+                                              "User-Agent": "kbeauty/5.0"})
+        try:
+            with urllib.request.urlopen(req, timeout=60) as r:
+                j = json.loads(r.read().decode("utf-8", "replace"))
+        except Exception:
+            WARN["fail"] += 1
+            continue
+        for d in (j.get("data") or []):
+            bn = only_digits(d.get("b_no", ""))
+            stt = (d.get("b_stt") or "").strip()
+            tax = (d.get("tax_type") or "").strip()
+            if tax.startswith("국세청에 등록되지"):
+                tax = ""
+            out[bn] = (stt, tax)
+        if (i // 100) % 10 == 0:
+            print(f"    · 사업자 상태 {min(i + 100, len(uniq)):,}/{len(uniq):,}건 조회", flush=True)
+    return out
+
+
+def use_restrict_lookup(key):
+    """사용제한 원료 API에서 {국문원료명: (CAS, 한도조건, 이명)} 사전 구축(팝업 상세용)."""
+    lut = {}
+    try:
+        total, _ = mfds_body(MFDS_USE, key, 1, 1)
+    except Exception:
+        return lut
+    per = 100
+    pages = min(max(1, -(-total // per)), USE_MAX_PAGES)
+    for p in range(1, pages + 1):
+        try:
+            _, items = mfds_body(MFDS_USE, key, p, per)
+        except Exception:
+            WARN["fail"] += 1
+            continue
+        for it in items:
+            ko = (it.get("INGR_STD_NAME") or "").strip()
+            if not ko or ko in lut:
+                continue
+            lut[ko] = ((it.get("CAS_NO") or "").strip(),
+                       (it.get("LIMIT_COND") or "").strip(),
+                       (it.get("INGR_SYNONYM") or "").strip())
+        if p % 25 == 0:
+            print(f"    · 사용제한 원료 {p}/{pages}p ({len(lut):,}종)", flush=True)
+    return lut
+
+
+def fetch_regulations(key):
+    """화장품 규제정보(원료별 금지/제한 국가) + CAS·한도조건(사용제한 API)
+    → [INCI, 국문, 규제구분, 금지국가, 제한국가, CAS, 한도조건, 이명]."""
+    total, _ = mfds_body(MFDS_REGL, key, 1, 1)
+    per = 100
+    pages = min(max(1, -(-total // per)), max(1, REGL_MAX // per))
+    rows = []
+    for p in range(1, pages + 1):
+        try:
+            _, items = mfds_body(MFDS_REGL, key, p, per)
+        except Exception:
+            WARN["fail"] += 1
+            continue
+        for it in items:
+            ko = (it.get("INGR_STD_NAME") or "").strip()
+            en = (it.get("INGR_ENG_NAME") or "").strip()
+            proh = (it.get("PROH_NATIONAL") or "").strip()
+            lim = (it.get("LIMIT_NATIONAL") or "").strip()
+            if not ko and not en:
+                continue
+            gtype = "금지" if proh else ("제한" if lim else "기타")
+            rows.append([en, ko, gtype, proh, lim])
+        if p % 20 == 0:
+            print(f"    · 원료 규제 {p}/{pages}p ({len(rows):,}건)", flush=True)
+    print("    · 사용제한 원료(CAS·한도조건) 조회…", flush=True)
+    lut = use_restrict_lookup(key)
+    for r in rows:
+        cas, limit, syn = lut.get(r[1], ("", "", ""))
+        r.extend([cas, limit, syn])
+    return rows, total
+
+
+# ===== UN Comtrade (세계 화장품 수출) =====
+UNCOMTRADE = "https://comtradeapi.un.org/data/v1/get/C/A/HS"
+UN_KO = {"France": "프랑스", "Rep. of Korea": "한국", "USA": "미국", "Singapore": "싱가포르",
+         "Germany": "독일", "China": "중국", "China, Hong Kong SAR": "홍콩", "Italy": "이탈리아",
+         "Japan": "일본", "Poland": "폴란드", "United Kingdom": "영국", "Spain": "스페인",
+         "Netherlands": "네덜란드", "Belgium": "벨기에", "Canada": "캐나다", "Switzerland": "스위스",
+         "Thailand": "태국", "India": "인도", "Ireland": "아일랜드", "Sweden": "스웨덴",
+         "United Arab Emirates": "아랍에미리트", "Russian Federation": "러시아", "Viet Nam": "베트남"}
+
+
+def uncomtrade_year(unkey, year):
+    """해당 연도 HS3304 세계 수출: {reporterCode: {name, v}} (partner=World 기준)."""
+    url = (f"{UNCOMTRADE}?cmdCode=3304&flowCode=X&period={year}"
+           f"&partnerCode=0&includeDesc=true")
+    req = urllib.request.Request(url, headers={"Ocp-Apim-Subscription-Key": unkey,
+                                               "User-Agent": "kbeauty/5.0"})
+    with urllib.request.urlopen(req, timeout=120) as r:
+        j = json.loads(r.read().decode("utf-8", "replace"))
+    m = {}
+    for d in (j.get("data") or []):
+        if d.get("partnerCode") != 0:
+            continue
+        rc = d.get("reporterCode") or 0
+        if not (0 < rc < 900):
+            continue
+        v = d.get("primaryValue") or 0
+        if rc not in m or v > m[rc]["v"]:
+            m[rc] = {"name": d.get("reporterDesc") or str(rc), "v": v}
+    return m
+
+
+def fetch_global(unkey):
+    """세계 화장품(HS3304) 수출 상위국 + 한국 순위, 최근 10개년."""
+    if not unkey:
+        return None
+    years = [TODAY.year - k for k in range(1, 11)]   # 최근 10년(가용 연도만 수집)
+    per_year, trend = {}, []
+    for y in years:
+        try:
+            m = uncomtrade_year(unkey, y)
+        except Exception as ex:
+            print(f"    · UN Comtrade {y} 건너뜀: {ex}", flush=True)
+            WARN["fail"] += 1
+            continue
+        if not m:
+            continue
+        arr = sorted(m.values(), key=lambda x: x["v"], reverse=True)
+        kr = m.get(410)
+        rank = next((i + 1 for i, x in enumerate(arr) if x is kr), None) if kr else None
+        top = [[UN_KO.get(x["name"], x["name"]), round(x["v"] / 1e9, 3)] for x in arr[:15]]
+        per_year[y] = {"top": top, "korea": round(kr["v"] / 1e9, 3) if kr else None,
+                       "rank": rank, "n": len(arr)}
+        trend.append({"y": y, "usdBn": round(kr["v"] / 1e9, 3) if kr else None, "rank": rank})
+        print(f"    · UN Comtrade {y} 수집 (상위 {len(arr)}개국, 한국 {rank}위)", flush=True)
+    if not per_year:
+        return None
+    latest = max(per_year.keys())
+    p = per_year[latest]
+    trend.sort(key=lambda x: x["y"])
+    return {"latestYear": latest, "top": p["top"], "koreaRank": p["rank"],
+            "koreaUsdBn": p["korea"], "numCountries": p["n"], "trend": trend}
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--key", required=True)
+    ap.add_argument("--uncomtrade", default="")
     ap.add_argument("--no-eu", action="store_true")
     ap.add_argument("--out", default="kbeauty_data.json")
     a = ap.parse_args()
@@ -301,7 +488,7 @@ def main():
             EXP.append(euE); IMP.append(euI)
 
     # ----- 식약처 -----
-    functionals, companies, counts = [], [], {}
+    functionals, companies, counts, regulations = [], [], {}, []
     try:
         print("· 식약처 기능성화장품 보고품목 수집…", flush=True)
         functionals, func_total, new2026 = fetch_functionals(a.key)
@@ -311,19 +498,48 @@ def main():
         print(f"  → 기능성 총 {func_total:,}건 중 최근2년 {len(functionals):,}건(올해 신규 {new2026:,}) · "
               f"업체 총 {comp_total:,}개사 중 최근3년 {len(companies):,}개사", flush=True)
     except Exception as ex:
-        print(f"  (식약처 수집 실패: {ex} — 기능성·기업은 데모 유지)", flush=True)
+        print(f"  (식약처 기능성·업체 수집 실패: {ex} — 데모 유지)", flush=True)
+    if companies:
+        try:
+            print("· 국세청 사업자 영업상태 조회…", flush=True)
+            bstat = fetch_bizstatus(a.key, [c[4] for c in companies])
+            for c in companies:
+                stt, tax = bstat.get(only_digits(c[4]), ("", ""))
+                c.extend([stt, tax])   # c[8]=영업상태, c[9]=과세유형
+            active = sum(1 for c in companies if len(c) > 8 and c[8] == "계속사업자")
+            print(f"  → 영업상태 조회 {len(bstat):,}건 (계속사업자 {active:,})", flush=True)
+        except Exception as ex:
+            print(f"  (사업자 영업상태 조회 실패: {ex})", flush=True)
+    try:
+        print("· 식약처 화장품 원료 규제정보 수집…", flush=True)
+        regulations, regl_total = fetch_regulations(a.key)
+        print(f"  → 원료 규제 총 {regl_total:,}건 중 {len(regulations):,}건 수집", flush=True)
+    except Exception as ex:
+        print(f"  (원료 규제 수집 실패: {ex} — 데모 유지)", flush=True)
+
+    # ----- UN Comtrade (세계 시장) -----
+    global_mkt = None
+    if a.uncomtrade:
+        try:
+            print("· UN Comtrade 세계 화장품(HS3304) 수출 수집…", flush=True)
+            global_mkt = fetch_global(a.uncomtrade)
+            if global_mkt:
+                print(f"  → {global_mkt['latestYear']}년 세계 {global_mkt['numCountries']}개국 중 "
+                      f"한국 {global_mkt['koreaRank']}위(${global_mkt['koreaUsdBn']}B)", flush=True)
+        except Exception as ex:
+            print(f"  (UN Comtrade 수집 실패: {ex} — 글로벌 섹션 데모 유지)", flush=True)
 
     payload = {
-        "source": "관세청 품목별 국가별 수출입실적 + 식약처 기능성·업체",
+        "source": "관세청 수출입 + 식약처 기능성·업체·원료규제 + UN Comtrade 세계시장",
         "generated": TODAY.isoformat(), "unit": "백만 달러", "granularity": "monthly",
         "months": [{"key": f"{p[:4]}-{p[4:]}", "y": int(p[:4]), "m": int(p[4:]),
                     "label": f"{p[2:4]}.{p[4:]}"} for p in MONTHS],
         "lastActualIdx": LAST_ACTUAL,
         "countries": countries,
-        "categories": [{"ko": name, "hs": "3304" if "색조" in name or "기초" in name else "", "price": price}
-                       for name, price in CATS],
+        "categories": [{"ko": name, "hs": hs, "price": price} for name, hs, price in CATS],
         "exp": EXP, "imp": IMP,
         "functionals": functionals, "companies": companies, "counts": counts,
+        "regulations": regulations, "global": global_mkt,
     }
     with open(a.out, "w", encoding="utf-8") as f:
         json.dump(payload, f, ensure_ascii=False)
