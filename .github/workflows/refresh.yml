@@ -1,0 +1,27 @@
+name: refresh-dashboard-data
+
+on:
+  schedule:
+    - cron: '0 20 * * 0'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Collect customs data
+        run: python kbeauty_collector.py --key "${{ secrets.CUSTOMS_KEY }}"
+      - name: Commit data to repo
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add kbeauty_data.json kbeauty_data.js
+          git commit -m "weekly data refresh" || echo "no changes"
+          git push
