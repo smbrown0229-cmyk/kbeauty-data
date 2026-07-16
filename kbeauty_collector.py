@@ -190,43 +190,59 @@ def short_addr(a):
     return " ".join(parts[:2]) if len(parts) >= 2 else (a or "")
 
 
+FUNC_CUTOFF = f"{TODAY.year - 2}{TODAY.month:02d}"   # 보고일 기준 최근 2년
+COMP_CUTOFF = f"{TODAY.year - 3}{TODAY.month:02d}"   # 허가/등록 기준 최근 3년
+
+
 def fetch_functionals(key):
+    """보고일이 최근 2년 이내인 기능성화장품을 전부 수집(전 페이지 스캔)."""
     total, _ = mfds_body(MFDS_RPT, key, 1, 1)
-    per, recent, new2026, scanned = 100, [], 0, 0
-    last = max(1, -(-total // per))
-    p = last
-    while p >= 1 and scanned < 45:
-        _, items = mfds_body(MFDS_RPT, key, p, per); scanned += 1
+    per = 100
+    pages = max(1, -(-total // per))
+    recent, newN = [], 0
+    for p in range(1, pages + 1):
+        try:
+            _, items = mfds_body(MFDS_RPT, key, p, per)
+        except Exception:
+            WARN["fail"] += 1
+            continue
         for it in items:
             dt = str(it.get("REPORT_DATE", "") or "")
             nm = it.get("ITEM_NAME") or ""
-            if nm:
+            if nm and len(dt) >= 6 and dt[:6] >= FUNC_CUTOFF:
                 recent.append((dt, nm, it.get("ENTP_NAME") or "", it.get("REPORT_FLAG_NAME") or "보고"))
-            if len(dt) >= 6 and "202601" <= dt[:6] <= "202606":
-                new2026 += 1
-        maxdt = max([str(it.get("REPORT_DATE", "")) for it in items] or ["0"])
-        if maxdt[:6] < "202601":
-            break
-        p -= 1
+                if dt[:4] == str(TODAY.year):
+                    newN += 1
+        if p % 25 == 0:
+            print(f"    · 기능성 {p}/{pages}p 스캔 (최근2년 {len(recent):,}건)", flush=True)
     recent.sort(key=lambda x: x[0], reverse=True)
-    funcs = [[nm, en, fl, "보고", fmt_date(dt)] for (dt, nm, en, fl) in recent[:40]]
-    return funcs, total, new2026
+    funcs = [[nm, en, fl, "보고", fmt_date(dt)] for (dt, nm, en, fl) in recent]
+    return funcs, total, newN
 
 
 def fetch_companies(key):
+    """허가/등록일이 최근 3년 이내인 업체를 전부 수집(전 페이지 스캔)."""
     total, _ = mfds_body(MFDS_MFCR, key, 1, 1)
     per = 100
-    last = max(1, -(-total // per))
-    _, items = mfds_body(MFDS_MFCR, key, last, per)
-    comps = []
-    for it in items:
-        nm = it.get("ENTP_NAME") or ""
-        if nm:
-            comps.append([nm, it.get("INDUTY") or "", short_addr(it.get("FACTORY_ADDR")),
-                          it.get("BOSS_NAME") or "", "", "",
-                          str(it.get("ENTP_PERMIT_DATE", "") or "")[:4]])
-    comps.reverse()
-    return comps[:80], total
+    pages = max(1, -(-total // per))
+    picked = []
+    for p in range(1, pages + 1):
+        try:
+            _, items = mfds_body(MFDS_MFCR, key, p, per)
+        except Exception:
+            WARN["fail"] += 1
+            continue
+        for it in items:
+            nm = it.get("ENTP_NAME") or ""
+            pd = str(it.get("ENTP_PERMIT_DATE", "") or "")
+            if nm and len(pd) >= 6 and pd[:6] >= COMP_CUTOFF:
+                picked.append((pd, [nm, it.get("INDUTY") or "", short_addr(it.get("FACTORY_ADDR")),
+                                    it.get("BOSS_NAME") or "", "", "", pd[:4]]))
+        if p % 25 == 0:
+            print(f"    · 업체 {p}/{pages}p 스캔 (최근3년 {len(picked):,}개사)", flush=True)
+    picked.sort(key=lambda x: x[0], reverse=True)
+    rows = [r for _, r in picked]
+    return rows, total
 
 
 def main():
@@ -280,7 +296,8 @@ def main():
         print("· 식약처 화장품 업체 수집…", flush=True)
         companies, comp_total = fetch_companies(a.key)
         counts = {"companies": comp_total, "funcTotal": func_total, "newFunctional": new2026}
-        print(f"  → 기능성 {func_total:,}건(2026상반기 신규 {new2026:,}) · 업체 {comp_total:,}개사", flush=True)
+        print(f"  → 기능성 총 {func_total:,}건 중 최근2년 {len(functionals):,}건(올해 신규 {new2026:,}) · "
+              f"업체 총 {comp_total:,}개사 중 최근3년 {len(companies):,}개사", flush=True)
     except Exception as ex:
         print(f"  (식약처 수집 실패: {ex} — 기능성·기업은 데모 유지)", flush=True)
 
